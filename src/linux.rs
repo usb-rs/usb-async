@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use libudev;
+use udev;
 use mio;
 use tokio::{prelude::*, reactor};
 
@@ -34,12 +34,12 @@ pub enum UsbError {
     Io(io::ErrorKind),
 }
 
-impl From<libudev::Error> for UsbError {
-    fn from(err: libudev::Error) -> Self {
-        use libudev::ErrorKind;
+impl From<udev::Error> for UsbError {
+    fn from(err: udev::Error) -> Self {
+        use udev::ErrorKind;
         match err.kind() {
-            ErrorKind::NoMem => panic!("usb-async: error from libudev: out of memory"),
-            ErrorKind::InvalidInput => panic!("usb-async: error from libudev: invalid input\nThis is probably a usb-async bug; please report it"),
+            ErrorKind::NoMem => panic!("usb-async: error from udev: out of memory"),
+            ErrorKind::InvalidInput => panic!("usb-async: error from udev: invalid input\nThis is probably a usb-async bug; please report it"),
             ErrorKind::Io(io_err) => UsbError::Io(io_err),
         }
     }
@@ -53,7 +53,7 @@ impl From<io::Error> for UsbError {
 
 pub struct Monitor<'a> {
     context: &'a Context,
-    socket: libudev::MonitorSocket<'a>,
+    socket: udev::MonitorSocket,
     reg: reactor::Registration,
 }
 
@@ -68,24 +68,25 @@ impl Stream for Monitor<'_> {
         match self.reg.poll_read_ready()? {
             Async::Ready(readiness) => {
                 if readiness.is_readable() {
-                    if let Some(event) = self.socket.receive_event() {
-                        let path = event.device().syspath();
+                    if let Some(event) = self.socket.next() {
+                        let device = event.device();
+                        let path = device.syspath();
                         println!("Got {} event on {}", event.device().property_value("ACTION").unwrap().to_str().unwrap(), path.display());
 
                         match event.event_type() {
-                            libudev::EventType::Add => {
+                            udev::EventType::Add => {
                                 match self.context.add_device(path) {
                                     Some(id) => Ok(Async::Ready(Some(Event::Add(id)))),
                                     None => Ok(Async::NotReady),
                                 }
                             },
-                            libudev::EventType::Remove => {
+                            udev::EventType::Remove => {
                                 match self.context.remove_device_by_path(path) {
                                     Some(id) => Ok(Async::Ready(Some(Event::Remove(id)))),
                                     None => Ok(Async::NotReady),
                                 }
                             },
-                            libudev::EventType::Change | libudev::EventType::Unknown => {
+                            udev::EventType::Change | udev::EventType::Unknown => {
                                 Ok(Async::NotReady) // For now
                             }
                         }
@@ -102,20 +103,20 @@ impl Stream for Monitor<'_> {
 }
 
 pub struct Context {
-    udev: libudev::Context,
+    udev: udev::Context,
     paths: RefCell<Vec<Option<PathBuf>>>,
 }
 
 impl Context {
     pub fn new() -> Result<Self, Box<dyn error::Error>> {
         let context = Self {
-            udev: libudev::Context::new()?,
+            udev: udev::Context::new()?,
             paths: RefCell::new(Vec::new()),
         };
 
         {
             // Scan for currently connected devices.
-            let mut enumerator = libudev::Enumerator::new(&context.udev)?;
+            let mut enumerator = udev::Enumerator::new(&context.udev)?;
             enumerator.match_subsystem("usb")?;
             for dev in enumerator.scan_devices()? {
                 let _ = context.add_device(dev.syspath());
@@ -126,7 +127,7 @@ impl Context {
     }
 
     pub fn monitor(&self) -> Result<Monitor<'_>, Box<dyn error::Error>> {
-        let mut monitor = libudev::Monitor::new(&self.udev)?;
+        let mut monitor = udev::MonitorBuilder::new(&self.udev)?;
         monitor.match_subsystem("usb")?;
         Ok(Monitor {
             context: self,
@@ -194,7 +195,7 @@ impl Context {
     }
 
     fn udev_lookup_hex(&self, id: Id, attr: &str) -> Result<u16, UsbError> {
-        fn udev_attribute_walk(dev: &libudev::Device, name: &str) -> Option<u16> {
+        fn udev_attribute_walk(dev: &udev::Device, name: &str) -> Option<u16> {
             let attr = dev.attributes().find(|attr| attr.name() == name);
             if let Some(attr) = attr {
                 let attr = attr.value()?.to_str()?;
@@ -219,7 +220,7 @@ impl Context {
     }
 
     fn udev_lookup_string(&self, id: Id, attr: &str) -> Result<String, UsbError> {
-        fn udev_attribute_walk<'a>(dev: &'a libudev::Device, name: &str) -> Option<String> {
+        fn udev_attribute_walk<'a>(dev: &'a udev::Device, name: &str) -> Option<String> {
             let attr = dev.attributes().find(|attr| attr.name() == name);
             if let Some(attr) = attr {
                 Some(String::from(attr.value()?.to_str()?))
